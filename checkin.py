@@ -205,7 +205,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
 
 
 def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
-
+    """重构推送内容格式，适配指定样式"""
     success_count = sum(1 for r in results if "成功" in r['status'])
     fail_count = sum(1 for r in results if "失败" in r['status'] or "失败" in r['exchange'])
     repeat_count = sum(1 for r in results if "重复" in r['status'])
@@ -214,16 +214,45 @@ def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
 
     content_lines = []
     for i, res in enumerate(results, 1):
-        line_parts = [
-            f"账号{i}:",
-            f"P:{res['points']}",
-            f"剩余天数:{res['days']}",
-            f"总积分:{res['points_total']}",
-            f"| {res['status']}",
-            f"; {res['exchange']}"
+        # 提取当前积分数值（从"46 积分"中解析）
+        try:
+            current_points = int(res['points_total'].split(' ')[0]) if res['points_total'] != "获取剩余积分失败" else 0
+        except (IndexError, ValueError):
+            current_points = 0
+        
+        # 提取本次获得的积分（处理"+"符号）
+        try:
+            points_gained = f"+{int(res['points'])}" if res['points'] != "0" else "+0"
+        except ValueError:
+            points_gained = "+0"
+        
+        # 剩余天数（保留原有格式）
+        remaining_days = res['days']
+        
+        # 签到结果（使用原有status）
+        checkin_result = res['status']
+        
+        # 构建基础内容
+        content_lines.append(f"账号{i}:")
+        content_lines.append(f"当前积分: {current_points} ({points_gained})")
+        content_lines.append(f"剩余天数: {remaining_days}")
+        content_lines.append(f"签到结果: {checkin_result}")
+        content_lines.append("")  # 空行分隔
+        content_lines.append("🎁 兑换选项:")
+        
+        # 计算各兑换选项的差值并拼接
+        exchange_plans = [
+            (100, 10),  # 100分→10天
+            (200, 30),  # 200分→30天
+            (500, 100)  # 500分→100天
         ]
-        line = " ".join(line_parts)
-        content_lines.append(line)
+        for need_points, get_days in exchange_plans:
+            lack_points = max(0, need_points - current_points)
+            content_lines.append(f"❌ {need_points}分→{get_days}天 (差{lack_points}分)")
+        
+        # 账号之间添加分隔线
+        if i < len(results):
+            content_lines.append("-" * 20)
 
     content = "\n".join(content_lines)
     return title, content
