@@ -12,6 +12,9 @@ def beijing_time_converter(timestamp):
     beijing_dt = utc_dt.astimezone(beijing_tz)
     return beijing_dt.timetuple()
 
+# 定义北京时区
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 root_logger = logging.getLogger()
@@ -20,7 +23,6 @@ for handler in root_logger.handlers:
         handler.formatter.converter = beijing_time_converter
 
 logger = logging.getLogger(__name__)
-
 
 # ENVIRONMENT
 ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
@@ -45,7 +47,9 @@ HEADERS_TEMPLATE = {
 }
 
 # Exchange Plan Points
-EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500} 
+EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500}
+# 兑换档位配置（和推送展示一致）
+EXCHANGE_GRADES = [(100, 10), (200, 30), (500, 100)]
 
 def load_config() -> Tuple[str, List[str], str]:
     push_key_env = os.environ.get(ENV_PUSH_KEY)
@@ -77,48 +81,49 @@ def load_config() -> Tuple[str, List[str], str]:
             logger.warning(f"环境变量 '{ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 'plan500'。")
             exchange_plan = "plan500"
 
-
     logger.info(f"共加载了 {len(cookies_list)} 个 Cookie 用于签到。")
     logger.info(f"当前 {ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
     logger.info(f"当前 {ENV_EXCHANGE_PLAN}: {exchange_plan}。")
 
     return push_key, cookies_list, exchange_plan
 
-
 def make_request(url: str, method: str, headers: Dict[str, str], data: Optional[Dict] = None, cookies: str = "") -> Optional[requests.Response]:
-
     session_headers = headers.copy()
     session_headers['cookie'] = cookies
 
     try:
         if method.upper() == 'POST':
-            response = requests.post(url, headers=session_headers, data=json.dumps(data))
+            response = requests.post(url, headers=session_headers, data=json.dumps(data), timeout=10)
         elif method.upper() == 'GET':
-            response = requests.get(url, headers=session_headers)
+            response = requests.get(url, headers=session_headers, timeout=10)
         else:
             logger.error(f"不支持的 HTTP 方法: {method}")
             return None
 
         if not response.ok:
-            logger.warning(f"向 {url} 发起的请求失败，状态码 {response.status_code}。响应内容: {response.text}")
+            logger.warning(f"向 {url} 发起的请求失败，状态码 {response.status_code}。响应内容: {response.text[:200]}")
             return None
         return response
     except requests.exceptions.RequestException as e:
         logger.error(f"向 {url} 发起请求时发生网络错误: {e}")
         return None
 
-
-def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str]:
-
+def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str, str]:
+    """
+    新增返回值：用户邮箱（第六个值）
+    返回：status_msg, points_gained, remaining_days, remaining_points, exchange_msg, user_email
+    """
     status_msg = "签到请求失败"
     points_gained = "0"
     remaining_days = "获取剩余天数失败"
     remaining_points = "获取剩余积分失败"
     exchange_msg = "兑换跳过或失败"
+    user_email = "获取邮箱失败"  # 新增邮箱字段
 
+    # 签到请求
     checkin_response = make_request(CHECKIN_URL, 'POST', HEADERS_TEMPLATE, CHECKIN_DATA, cookies=cookie)
     if not checkin_response:
-        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
+        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, user_email
 
     try:
         checkin_data = checkin_response.json()
@@ -131,23 +136,27 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
             status_msg = "重复签到，明天再来"
             points_gained = "0"
         else:
-            status_msg = f"签到失败: {response_message}"
+            status_msg = f"签到失败：{response_message}"
             points_gained = "0"
     except json.JSONDecodeError:
-        logger.error(f"解析签到响应 JSON 失败: {checkin_response.text}")
-        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
+        logger.error(f"解析签到响应 JSON 失败: {checkin_response.text[:200]}")
+        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, user_email
 
+    # 状态请求（提取邮箱+剩余天数）
     status_response = make_request(STATUS_URL, 'GET', HEADERS_TEMPLATE, cookies=cookie)
     if status_response:
         try:
             status_data = status_response.json()
+            # 提取用户邮箱（核心新增）
+            user_email = status_data.get('data', {}).get('email', '获取邮箱失败')
+            # 提取剩余天数
             left_days_float = status_data.get('data', {}).get('leftDays', None)
             if left_days_float is not None:
                 remaining_days = f"{int(float(left_days_float))} 天"
             else:
                 remaining_days = "获取剩余天数失败 (响应结构异常)"
         except json.JSONDecodeError:
-            logger.error(f"解析状态响应 JSON 失败: {status_response.text}")
+            logger.error(f"解析状态响应 JSON 失败: {status_response.text[:200]}")
             remaining_days = "获取剩余天数失败 (JSON解析错误)"
         except (ValueError, TypeError):
             logger.error(f"解析剩余天数时出错: {status_data.get('data', {}).get('leftDays', 'unknown')}")
@@ -155,7 +164,9 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
     else:
         remaining_days = "获取剩余天数失败 (HTTP请求失败)"
 
+    # 积分请求
     points_response = make_request(POINTS_URL, 'GET', HEADERS_TEMPLATE, cookies=cookie)
+    points_data = {}
     if points_response:
         try:
             points_data = points_response.json()
@@ -165,7 +176,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
             else:
                 remaining_points = "获取剩余积分失败 (响应结构异常)"
         except json.JSONDecodeError:
-            logger.error(f"解析积分响应 JSON 失败: {points_response.text}")
+            logger.error(f"解析积分响应 JSON 失败: {points_response.text[:200]}")
             remaining_points = "获取剩余积分失败 (JSON解析错误)"
         except (ValueError, TypeError):
             logger.error(f"解析剩余积分时出错: {points_data.get('points', 'unknown')}")
@@ -173,6 +184,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
     else:
         remaining_points = "获取剩余积分失败 (HTTP请求失败)"
 
+    # 兑换逻辑
     current_points_numeric = 0
     try:
         current_points_numeric = int(float(points_data.get('points', 0)))
@@ -193,7 +205,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
                     detailed_msg = exchange_data.get('message', "未知错误")
                     exchange_msg = f"兑换失败: {exchange_plan}, 错误代码: {code}, 详情: {detailed_msg}"
             except json.JSONDecodeError:
-                logger.error(f"解析兑换响应 JSON 失败: {exchange_response.text}")
+                logger.error(f"解析兑换响应 JSON 失败: {exchange_response.text[:200]}")
                 exchange_msg = f"兑换响应解析失败: {exchange_plan}"
         else:
             exchange_msg = f"兑换请求失败：{exchange_plan}"
@@ -201,62 +213,67 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         logger.info(f"积分不足以兑换 {exchange_plan}。所需: {required_points}, 当前: {current_points_numeric}")
         exchange_msg = f"积分不足，未兑换: {exchange_plan}"
 
-    return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
-
+    # 新增返回邮箱
+    return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, user_email
 
 def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
-    """重构推送内容格式，适配指定样式"""
-    success_count = sum(1 for r in results if "成功" in r['status'])
-    fail_count = sum(1 for r in results if "失败" in r['status'] or "失败" in r['exchange'])
-    repeat_count = sum(1 for r in results if "重复" in r['status'])
-
-    title = f'GLaDOS 签到, 成功{success_count}, 失败{fail_count}, 重复{repeat_count}'
+    """
+    生成你指定的推送样式，含缩进、✅/❌、邮箱、推送时间
+    """
+    # 统计签到状态数量
+    success_count = sum(1 for r in results if "签到成功" in r['status'])
+    repeat_count = sum(1 for r in results if "重复签到" in r['status'])
+    fail_count = sum(1 for r in results if "失败" in r['status'])
+    # 标题格式
+    title = f'GLaDOS签到结果: 成功{success_count} | 重复{repeat_count} | 失败{fail_count}'
 
     content_lines = []
+    # 遍历每个账号
     for i, res in enumerate(results, 1):
-        # 提取当前积分数值（从"46 积分"中解析）
+        content_lines.append(f"【账号 {i}】")
+        # 邮箱（缩进2个空格）
+        content_lines.append(f"  邮箱：{res['email']}")
+        
+        # 解析当前积分（数值，用于兑换判断）
         try:
             current_points = int(res['points_total'].split(' ')[0]) if res['points_total'] != "获取剩余积分失败" else 0
         except (IndexError, ValueError):
             current_points = 0
+            res['points_total'] = "0 积分"
         
-        # 提取本次获得的积分（处理"+"符号）
+        # 解析本次获得积分（带+号）
         try:
             points_gained = f"+{int(res['points'])}" if res['points'] != "0" else "+0"
         except ValueError:
             points_gained = "+0"
         
-        # 剩余天数（保留原有格式）
-        remaining_days = res['days']
+        # 剩余天数/签到结果（保留原数据，缩进2个空格）
+        content_lines.append(f"  当前积分：{current_points} ({points_gained})")
+        content_lines.append(f"  剩余天数：{res['days']}")
+        content_lines.append(f"  签到结果：{res['status']}")
+        # 兑换选项标题（缩进2个空格）
+        content_lines.append(f"  兑换选项：")
         
-        # 签到结果（使用原有status）
-        checkin_result = res['status']
+        # 遍历兑换档位，判断可兑换/积分不足（缩进4个空格）
+        for need_p, get_d in EXCHANGE_GRADES:
+            if current_points >= need_p:
+                content_lines.append(f"    ✅ {need_p}分 → {get_d}天 (可兑换)")
+            else:
+                lack_p = need_p - current_points
+                content_lines.append(f"    ❌ {need_p}分 → {get_d}天 (差{lack_p}分)")
         
-        # 构建基础内容
-        content_lines.append(f"账号{i}:")
-        content_lines.append(f"当前积分: {current_points} ({points_gained})")
-        content_lines.append(f"剩余天数: {remaining_days}")
-        content_lines.append(f"签到结果: {checkin_result}")
-        content_lines.append("")  # 空行分隔
-        content_lines.append("🎁 兑换选项:")
-        
-        # 计算各兑换选项的差值并拼接
-        exchange_plans = [
-            (100, 10),  # 100分→10天
-            (200, 30),  # 200分→30天
-            (500, 100)  # 500分→100天
-        ]
-        for need_points, get_days in exchange_plans:
-            lack_points = max(0, need_points - current_points)
-            content_lines.append(f"❌ {need_points}分→{get_days}天 (差{lack_points}分)")
-        
-        # 账号之间添加分隔线
+        # 账号之间空一行分隔
         if i < len(results):
-            content_lines.append("-" * 20)
+            content_lines.append("")
 
+    # 新增推送时间（北京时间，精确到秒）
+    push_time = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    content_lines.append("")
+    content_lines.append(f"📅 推送时间（北京时间）：{push_time}")
+    
+    # 拼接内容（按行换行）
     content = "\n".join(content_lines)
     return title, content
-
 
 def main():
     try:
@@ -264,28 +281,34 @@ def main():
 
         if not cookies_list:
             logger.error("未找到有效的 Cookie，退出程序。")
-            title, content = "# 未找到 cookies!", ""
+            title, content = "GLaDOS签到结果", "# 未找到有效的Cookie，请检查环境变量配置！"
         else:
             results = []
             for idx, cookie in enumerate(cookies_list, 1):
                 logger.info(f"正在处理第 {idx} 个账户...")
-                status, points, days, points_total, exchange = checkin_and_process(cookie, exchange_plan)
+                # 接收新增的邮箱返回值
+                status, points, days, points_total, exchange, email = checkin_and_process(cookie, exchange_plan)
                 results.append({
                     'status': status,
                     'points': points,
                     'days': days,
                     'points_total': points_total,
-                    'exchange': exchange
+                    'exchange': exchange,
+                    'email': email  # 新增邮箱字段存储
                 })
 
+            # 生成推送内容
             title, content = format_push_content(results)
             logger.info(f"推送标题: {title}")
             logger.info(f"推送内容:\n{content}")
 
     except Exception as e:
-        logger.error(f"主程序执行过程中发生未预期的错误: {e}")
-        title, content = "# 脚本执行出错", str(e)
+        logger.error(f"主程序执行过程中发生未预期的错误: {e}", exc_info=True)
+        push_time = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        title = "GLaDOS签到结果"
+        content = f"❌ 脚本执行出错：{str(e)}\n\n📅 推送时间（北京时间）：{push_time}"
 
+    # 推送通知
     if not push_key:
         logger.info(f"未设置 '{ENV_PUSH_KEY}'，跳过推送通知。")
     else:
@@ -295,7 +318,6 @@ def main():
             logger.info("推送通知发送成功。")
         except Exception as e:
             logger.error(f"发送推送通知失败: {e}")
-
 
 if __name__ == '__main__':
     main()
