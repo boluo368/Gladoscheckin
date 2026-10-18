@@ -181,10 +181,24 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         response_message = checkin_data.get('message', '无消息字段')  # 签到接口返回的提示信息
         points_gained = str(checkin_data.get('points', 0))           # 本次获得积分
 
-        # 解析签到结果
+# 解析签到结果：先识别重复签到，再判断成功，最后为失败
         response_code = checkin_data.get('code', -1)
-        if response_code == 0:
-            # code=0 均为请求成功，区分首次签到和重复签到
+        response_lower = response_message.lower()
+        
+        # 匹配所有重复签到的提示文案（不受code影响）
+        is_repeat = (
+            "today's observation logged" in response_lower
+            or "return tomorrow" in response_lower
+            or "repeat" in response_lower
+            or "already" in response_lower
+            or "已签到" in response_message
+            or "明天再来" in response_message
+        )
+        
+        if is_repeat:
+            status_msg = "今日已签到，明日再来"
+            points_gained = "0"
+        elif response_code == 0:
             got_points = checkin_data.get('points', 0)
             if got_points > 0:
                 status_msg = f"签到成功，获得 {points_gained} 积分"
@@ -283,7 +297,7 @@ def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
     """
     # 统计签到状态数量
     success_count = sum(1 for r in results if "签到成功" in r['status'])  # 成功数
-    repeat_count = sum(1 for r in results if "重复签到" in r['status'])    # 重复数
+    repeat_count = sum(1 for r in results if "今日已签到" in r['status'])    # 重复数
     fail_count = sum(1 for r in results if "失败" in r['status'])         # 失败数
     # 生成推送标题
     title = f'GLaDOS签到结果: 成功{success_count} | 重复{repeat_count} | 失败{fail_count}'
