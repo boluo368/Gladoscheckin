@@ -196,14 +196,14 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         )
         
         if is_repeat:
-            status_msg = "今日已签到，明日再来"
+            status_msg = "重复签到，明天再来"
             points_gained = "0"
         elif response_code == 0:
             got_points = checkin_data.get('points', 0)
             if got_points > 0:
                 status_msg = f"签到成功，获得 {points_gained} 积分"
             else:
-                status_msg = "今日已签到，明日再来"
+                status_msg = "重复签到，明天再来"
                 points_gained = "0"
         else:
             status_msg = f"签到失败：{response_message}"
@@ -297,7 +297,7 @@ def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
     """
     # 统计签到状态数量
     success_count = sum(1 for r in results if "签到成功" in r['status'])  # 成功数
-    repeat_count = sum(1 for r in results if "今日已签到" in r['status'])    # 重复数
+    repeat_count = sum(1 for r in results if "重复签到" in r['status'])    # 重复数
     fail_count = sum(1 for r in results if "失败" in r['status'])         # 失败数
     # 生成推送标题
     title = f'GLaDOS签到结果: 成功{success_count} | 重复{repeat_count} | 失败{fail_count}'
