@@ -182,11 +182,15 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         points_gained = str(checkin_data.get('points', 0))           # 本次获得积分
 
         # 解析签到结果
-        if "Checkin! Got" in response_message:
-            status_msg = f"签到成功，获得 {points_gained} 积分"
-        elif "Checkin Repeats!" in response_message:
-            status_msg = "Today's observation logged.Return tomorrow for more points."
-            points_gained = "0"  # 重复签到无积分
+        response_code = checkin_data.get('code', -1)
+        if response_code == 0:
+            # code=0 均为请求成功，区分首次签到和重复签到
+            got_points = checkin_data.get('points', 0)
+            if got_points > 0:
+                status_msg = f"签到成功，获得 {points_gained} 积分"
+            else:
+                status_msg = "今日已签到，明日再来"
+                points_gained = "0"
         else:
             status_msg = f"签到失败：{response_message}"
             points_gained = "0"
